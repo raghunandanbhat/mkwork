@@ -1,0 +1,131 @@
+#!/bin/bash
+
+PROJECT_REPO="$HOME/projects/mariadb/server" # Adjust as needed
+
+usage() {
+    echo "Usage: $0 [options]"
+    echo ""
+    echo "Options:"
+    echo "-s, --seed <jira>        : JIRA issue number (e.g., MDEV-12345)"
+    echo "-v, --version <version>  : Server version (e.g., 11.4)"
+    echo "-i, --in-worktree        : Put build dir inside worktree (default: sibling)"
+    echo "-d, --delete <jira-ver>  : Delete mode (e.g., MDEV-12345-11.4)"
+    echo "-h, --help               : Show this help message"
+    echo ""
+}
+
+# Defaults
+SEED=""
+VERSION=""
+BUILD_DIR_IN_WORKTREE=false
+DELETE_TARGET=""
+
+# Arg parsing
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--seed)
+            SEED="$2"
+            shift 2
+            ;;
+        -v|--version)
+            VERSION="$2"
+            shift 2
+            ;;
+        -i|--in-worktree)
+            BUILD_DIR_IN_WORKTREE=true
+            shift
+            ;;
+        -d|--delete)
+            DELETE_TARGET="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Validate repo
+if [ ! -d "$PROJECT_REPO/.git" ]; then
+    echo "Error: $PROJECT_REPO is not a valid Git repository."
+    exit 1
+fi
+
+cd "$PROJECT_REPO" || exit 1
+
+if [ -n "$DELETE_TARGET" ]; then
+    # Deletion mode
+    WORKTREE_DIR="$(dirname "$PROJECT_REPO")/$DELETE_TARGET"
+    BUILD_DIR="$WORKTREE_DIR-build"
+
+    if [ ! -d "$WORKTREE_DIR" ]; then
+        echo "Worktree $WORKTREE_DIR not found."
+        exit 1
+    fi
+
+    cd "$WORKTREE_DIR" || exit 1
+
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Warning: Uncommitted changes in $WORKTREE_DIR"
+        echo "Aborting delete."
+        exit 1
+    fi
+
+    cd "$PROJECT_REPO" || exit 1
+    git worktree remove --force "$WORKTREE_DIR"
+    git worktree prune
+
+    if [ -d "$BUILD_DIR" ]; then
+        rm -rf "$BUILD_DIR"
+        echo "Removed build directory $BUILD_DIR"
+    fi
+
+    echo "Deleted worktree and cleaned up."
+    exit 0
+fi
+
+# Creation mode
+if [[ -z "$SEED" || -z "$VERSION" ]]; then
+    echo "Missing required arguments for create mode."
+    usage
+    exit 1
+fi
+
+WORKTREE_NAME="${SEED}-${VERSION}"
+WORKTREE_PATH="$(dirname "$PROJECT_REPO")/$WORKTREE_NAME"
+BUILD_DIR="$WORKTREE_PATH-build"
+
+if [ "$BUILD_DIR_IN_WORKTREE" = true ]; then
+    BUILD_DIR="${WORKTREE_PATH}/build"
+fi
+
+# Check if worktree or build dir already exists
+if [ -d "$WORKTREE_PATH" ]; then
+    echo "Worktree directory already exists: $WORKTREE_PATH"
+    exit 1
+fi
+
+if [ -d "$BUILD_DIR" ]; then
+    echo "Build directory already exists: $BUILD_DIR"
+    exit 1
+fi
+
+# Create worktree
+if git worktree add "$WORKTREE_PATH" "$VERSION"; then
+    echo "Created worktree at $WORKTREE_PATH"
+else
+    echo "Failed to create worktree. Exiting."
+    exit 1
+fi
+
+# Create build dir
+mkdir -p "$BUILD_DIR"
+echo "Created build directory at $BUILD_DIR"
+
+exit 0
