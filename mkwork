@@ -6,11 +6,12 @@ usage() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
-    echo "-s, --seed <jira>        : JIRA issue number (e.g., MDEV-12345)"
-    echo "-v, --version <version>  : Server version (e.g., 11.4)"
-    echo "-i, --in-worktree        : Put build dir inside worktree (default: sibling)"
-    echo "-d, --delete <jira-ver>  : Delete mode (e.g., MDEV-12345-11.4)"
-    echo "-h, --help               : Show this help message"
+    echo "-s, --seed <jira>            : JIRA issue number (e.g., MDEV-12345)"
+    echo "-v, --version <version>      : Server version (e.g., 11.4)"
+    echo "-i, --in-worktree            : Put build dir inside worktree (default: sibling)"
+    echo "-d, --delete <jira-ver>      : Delete mode (e.g., MDEV-12345-11.4)"
+    echo "-D, --force-delete <jira-ver>: Delete + Ignore Uncommitted files (e.g., -D MDEV-12345-11.4)"
+    echo "-h, --help                   : Show this help message"
     echo ""
 }
 
@@ -19,6 +20,7 @@ SEED=""
 VERSION=""
 BUILD_DIR_IN_WORKTREE=false
 DELETE_TARGET=""
+FORCE_DELETE_MODE=false
 
 # Arg parsing
 while [[ $# -gt 0 ]]; do
@@ -36,7 +38,13 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -d|--delete)
+            FORCE_DELETE_MODE=false
             DELETE_TARGET="$2"
+            shift 2
+            ;;
+        -D|--force-delete)
+            FORCE_DELETE_MODE=true
+            DELETE_TARGET="$2" # Ensure DELETE_TARGET is set for -D
             shift 2
             ;;
         -h|--help)
@@ -62,28 +70,69 @@ cd "$PROJECT_REPO" || exit 1
 if [ -n "$DELETE_TARGET" ]; then
     # Deletion mode
     WORKTREE_DIR="$(dirname "$PROJECT_REPO")/$DELETE_TARGET"
-    BUILD_DIR="$WORKTREE_DIR-build"
+    BUILD_DIR_NAME="$DELETE_TARGET-build"
 
-    if [ ! -d "$WORKTREE_DIR" ]; then
-        echo "Worktree $WORKTREE_DIR not found."
-        exit 1
+    BUILT_OUTSIDE="$(dirname "$PROJECT_REPO")/$BUILD_DIR_NAME" # Out-of-source build dir
+    BUILT_INSIDE="${WORKTREE_DIR}/$BUILD_DIR_NAME" # Build dir inside the work tree
+
+    BUILD_DIR_TO_REMOVE=""
+    if [ -d "$BUILT_OUTSIDE" ]; then
+        BUILD_DIR_TO_REMOVE=$BUILT_OUTSIDE
+    elif [ -d "$BUILT_INSIDE" ]; then
+        BUILD_DIR_TO_REMOVE=$BUILT_INSIDE
+    fi
+
+    # First, check if the directory exists AND if Git recognizes it as a worktree
+    # git worktree list will show valid worktrees. Grepping for the path ensures it's *our* worktree.
+    IS_VALID_WORKTREE=$(git worktree list --porcelain | grep "^worktree $WORKTREE_DIR$" | wc -l)
+
+    if [ "$IS_VALID_WORKTREE" -eq 0 ]; then
+        echo "Worktree $WORKTREE_DIR not found or not a valid Git worktree."
+
+        # Attempt to prune stale entries
+        git worktree prune >/dev/null 2>&1
+
+        # If the directory still exists, but wasn't a valid worktree (e.g., manually deleted .git file)
+        if [ -d "$WORKTREE_DIR" ]; then
+            echo "Removing orphaned worktree directory: $WORKTREE_DIR (was not a valid Git worktree)."
+            rm -rf "$WORKTREE_DIR"
+            echo "Removed build directory $WORKTREE_DIR"
+        fi
+
+        # Always attempt to remove the associated build directory if its path was determined
+        if [ -n "$BUILD_DIR_TO_REMOVE" ] && [ -d "$BUILD_DIR_TO_REMOVE" ]; then
+            echo "Attempting to remove associated build directory: $BUILD_DIR_TO_REMOVE"
+            rm -rf "$BUILD_DIR_TO_REMOVE"
+            echo "Removed build directory $BUILD_DIR_TO_REMOVE"
+        fi
+        exit 0
     fi
 
     cd "$WORKTREE_DIR" || exit 1
 
-    if [ -n "$(git status --porcelain)" ]; then
-        echo "Warning: Uncommitted changes in $WORKTREE_DIR"
-        echo "Aborting delete."
-        exit 1
+    if [ "$FORCE_DELETE_MODE" = false ]; then
+        if [ -n "$(git status --porcelain)" ]; then
+            echo "Warning: Uncommitted changes in $WORKTREE_DIR"
+            echo "Aborting delete."
+            exit 1
+        fi
     fi
 
     cd "$PROJECT_REPO" || exit 1
-    git worktree remove --force "$WORKTREE_DIR"
+
+    if [ "$FORCE_DELETE_MODE" = true ]; then
+        echo "Force deleting worktree $WORKTREE_DIR, ignoring uncommitted changes"
+        git worktree remove --force "$WORKTREE_DIR"
+    else
+        echo "Deleting worktree $WORKTREE_DIR"
+        git worktree remove "$WORKTREE_DIR"
+    fi
+
     git worktree prune
 
-    if [ -d "$BUILD_DIR" ]; then
-        rm -rf "$BUILD_DIR"
-        echo "Removed build directory $BUILD_DIR"
+    if [ -d "$BUILD_DIR_TO_REMOVE" ]; then
+        rm -rf "$BUILD_DIR_TO_REMOVE"
+        echo "Removed build directory $BUILD_DIR_TO_REMOVE"
     fi
 
     echo "Deleted worktree and cleaned up."
@@ -99,10 +148,14 @@ fi
 
 WORKTREE_NAME="${SEED}-${VERSION}"
 WORKTREE_PATH="$(dirname "$PROJECT_REPO")/$WORKTREE_NAME"
-BUILD_DIR="$WORKTREE_PATH-build"
 
+BUILD_DIR_NAME="${WORKTREE_NAME}-build"
+
+BUILD_DIR=""
 if [ "$BUILD_DIR_IN_WORKTREE" = true ]; then
-    BUILD_DIR="${WORKTREE_PATH}/build"
+    BUILD_DIR="${WORKTREE_PATH}/$BUILD_DIR_NAME"
+else
+    BUILD_DIR="$(dirname "$PROJECT_REPO")/$BUILD_DIR_NAME"
 fi
 
 # Check if worktree or build dir already exists
